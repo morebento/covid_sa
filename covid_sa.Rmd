@@ -1,0 +1,222 @@
+---
+title: "South Australian COVID-19 Data Analyses"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    theme: spacelab
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+
+library(janitor)
+library(tidyverse)
+library(lubridate)
+library(tidyquant)
+library(googlesheets4)
+library(tidyquant)
+library(ggrepel)
+library(plotly)
+library(DT)
+library(tibbletime)
+
+# gather the data
+data_raw_tbl <- googlesheets4::read_sheet("https://docs.google.com/spreadsheets/d/1AHOf4y6mkvizSMG2GZ1GSHFRHmi_PteCX9r8fAmXhlk/edit?usp=sharing", sheet="Data")
+
+# get the date for labelling
+date_label <- format(now(), "%d-%m-%Y")
+
+
+```
+
+Overview
+===================================
+
+Column
+-----------------------------------
+ 
+
+### SA Health Covid Data - Transcribed from SA Health press releases
+
+This dashboard presents some simple analyses of data collated from press releases related to the South Australian COVID-19 outbreak made by the SA Department of Health. 
+
+Why? Well I live in Adelaide and data was not being presented at the State level at the time I started this, only via press releases. So I started transcribing the data and doing some charts. 
+
+I'm particularly interested in the rates and log-log behaviour to the only way to do that was collect my own data and prepare plots 
+
+The SA Government has lots of really nice data available at their dashboard page https://www.covid-19.sa.gov.au/home/dashboard so please check that out as it's the official data 
+
+__Any errors are due to me, this is not official data__
+
+The process - 
+
+* Data are transcribed from the SA Health Covid press releases on the day they are released, or as close to it as possible from this link https://www.sahealth.sa.gov.au/wps/wcm/connect/public+content/sa+health+internet/about+us/news+and+media/all+media+releases/all+media+releases
+* The data are entered into a spreadsheet on Google Sheets at the following link https://docs.google.com/spreadsheets/d/1AHOf4y6mkvizSMG2GZ1GSHFRHmi_PteCX9r8fAmXhlk/edit?usp=sharing
+* An R script is used to tidy and analyse the data and then prepare this dashboard using the `flexdashboard` library
+
+Analyses so far -
+
+* Time Series Plots
+* Total vs Daily New Cases 
+* Daily Growth Factor vs Time
+* Percentage Deaths per Case
+
+Click on the `Charts` tab and then select the appropriate tab title. You can also click on the `Data` tab to view the raw data
+
+Dashboard last updated 30th April 2020
+
+Code here https://github.com/morebento/covid_sa
+
+Charts
+===================================
+
+
+Row {.tabset .tabset-fade}
+------------------------------------
+
+### Time Series Plots
+
+Active Cases is calculated as `Total Cases - Cleared of Covid Total - Deaths Total`
+
+```{r}
+
+time_series_plot <- data_raw_tbl %>%
+    select(Date, `Total Cases`, `Daily New Cases`, `Cleared of Covid Total`, `Deaths Total`) %>%
+    mutate(
+        `Active Cases` = `Total Cases` - `Cleared of Covid Total` - `Deaths Total`
+    ) %>%
+    gather(attribute, value, -Date) %>%
+    drop_na() %>%
+    clean_names() %>%
+    ggplot(aes(date, value)) +
+    geom_line(aes(colour=attribute)) +
+    scale_colour_tq() +
+    theme_tq() +
+    labs(
+        title = "Total, Daily and Cleared Cases vs Time",
+        caption = str_glue("{date_label}, @morebento"),
+        colour = "Measure"
+    )
+
+ggplotly(time_series_plot)
+
+```
+
+
+### Total vs Daily New Cases 
+
+Inspried by Minute Physics' video https://www.youtube.com/watch?v=54XLXg4fYsc "Exponential increase on this chart should look like a line with a constant slope of +1.0.\" So anything dropping off to the right represents the outbreak is being bought under control. Axes are Log 10 transformed"
+
+
+```{r}
+log_plot <- data_raw_tbl %>%
+    ggplot(aes(`Total Cases`, `Daily New Cases`, label=Date)) +
+    geom_point(colour=palette_light()[1]) +
+    #geom_ma(n=3) +
+    geom_smooth(se=FALSE, aes(colour="Three Point Moving Average")) +
+    scale_x_log10() +
+    scale_y_log10() +
+    scale_colour_tq() +
+    theme_tq() +
+    labs(
+        title  = "Total vs Daily New Cases ",
+        caption =  str_glue("{date_label}, @morebento")
+    )
+
+ggplotly(log_plot)
+
+```
+
+### Daily Growth Factor vs Time
+
+5 day rolling mean and naive (previous day) rates provided. Inspired by \"The one COVID-19 number to watch\". https://www.abc.net.au/news/2020-04-10/coronavirus-data-australia-growth-factor-covid-19"
+
+```{r}
+
+
+# define a rolling mean using rollify
+rolling_mean <- rollify(mean, window=5)
+
+growth_factor_plot <- data_raw_tbl %>%
+    clean_names() %>%
+    select(date, total_cases) %>%
+    mutate(
+        previous_total_cases = lag(total_cases, order_by = date)
+    ) %>%
+    mutate(
+        rolling_mean_5 = rolling_mean(total_cases)
+    ) %>%
+    mutate(
+        rate_5_day_rolling_mean = total_cases / rolling_mean_5,
+        rate_naive = total_cases / previous_total_cases
+    ) %>%
+    select(date, rate_5_day_rolling_mean, rate_naive) %>%
+    gather(metric, value, -date) %>%
+    drop_na() %>%
+    mutate(
+        metric = str_replace_all(metric, "_", " "),
+        metric = str_to_title(metric)
+    ) %>%
+    ggplot(aes(date, value)) +
+    geom_line(aes(colour=metric)) +
+    #ylim(0.75, 1.75) +
+    scale_colour_tq() +
+    theme_tq()  +
+    labs(
+        title = "Daily Growth Factor vs Time",
+        y = "Daily Growth Factor",       
+        x = "Date",
+        caption = str_glue("{date_label}, @morebento"),
+        color = "Metric"
+    )
+
+
+ggplotly(growth_factor_plot)
+
+```
+
+### Percentage Deaths per Case 
+
+Deaths per case as a percentge is calculated and then plotted with a three point moving average. 
+
+```{r}
+
+death_plot <- data_raw_tbl %>%
+    clean_names() %>%
+    select(date, total_cases, deaths_total) %>%
+    mutate(
+        deaths_per_case_pc = (deaths_total / total_cases) * 100
+    ) %>%
+    ggplot(aes(date, deaths_per_case_pc)) +
+    geom_point(aes(colour="Actual Data")) +
+    geom_smooth(se=FALSE, aes(colour="Three Point Moving Average")) +
+    ylim(0, 1) +
+    scale_colour_tq() +
+    theme_tq()  +
+    labs(
+        title = "Percentage Deaths per Case ",
+        y = "Deaths per Case (%)",       
+        x = "Date",
+        caption = str_glue("{date_label}, @morebento"),
+        colour="Data Type"
+    )
+    
+
+ggplotly(death_plot)
+
+```
+
+
+Data
+===================================
+
+
+Row {data-height=200}
+------------------------------------
+
+
+### Transcribed Data
+
+```{r}
+DT::datatable(data_raw_tbl)
+```
